@@ -22,6 +22,7 @@ const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("equipment_rental_platform");
 const users = database.collection("user");
 const equipments = database.collection("equipment");
+const rentals = database.collection("rental");
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -202,6 +203,196 @@ app.get("/equipment/:id", async (req, res) => {
   } catch (err) {
     console.error("Error fetching equipment:", err);
     res.status(500).send({ error: "Failed to fetch equipment" });
+  }
+});
+
+
+//  Rentals API
+
+
+// GET /rentals?userId=... — bookings of one customer, newest first
+app.get("/rentals", async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).send({ error: "userId is required" });
+    }
+
+    const list = await rentals
+      .find({ customerId: String(userId) })
+      .sort({ bookingDate: -1 })
+      .toArray();
+
+    res.status(200).send(list);
+  } catch (err) {
+    console.error("Error fetching rentals:", err);
+    res.status(500).send({ error: "Failed to fetch rentals" });
+  }
+});
+
+// POST /rentals — a customer rents an equipment for a date range
+app.post("/rentals", async (req, res) => {
+  try {
+    const {
+      equipmentId,
+      equipmentName,
+      customerId,
+      customerName,
+      startDate,
+      endDate,
+      quantity,
+      rentalPrice,
+      rentalType,
+    } = req.body;
+
+    if (!equipmentId || !customerId || !startDate || !endDate) {
+      return res.status(400).send({
+        error: "equipmentId, customerId, startDate and endDate are required",
+      });
+    }
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) {
+      return res.status(400).send({ error: "Invalid rental dates" });
+    }
+
+    const qty = Math.max(1, Number(quantity) || 1);
+    const days = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 86400000));
+    const price = Number(rentalPrice) || 0;
+
+    // Price of the whole window, priced by the item's rental type.
+    let units = days;
+    if (rentalType === "Weekly") units = Math.ceil(days / 7);
+    if (rentalType === "Monthly") units = Math.ceil(days / 30);
+
+    const rental = {
+      equipmentId: String(equipmentId),
+      equipmentName: equipmentName || "Equipment",
+      customerId: String(customerId),
+      customerName: customerName || "",
+      startDate,
+      endDate,
+      quantity: qty,
+      days,
+      totalAmount: price * units * qty,
+      paymentStatus: "Pending",
+      bookingStatus: "Pending",
+      bookingDate: new Date(),
+    };
+
+    const result = await rentals.insertOne(rental);
+
+    res.status(201).send({ ...rental, _id: result.insertedId });
+  } catch (err) {
+    console.error("Error creating rental:", err);
+    res.status(500).send({ error: "Failed to create rental" });
+  }
+});
+
+
+// ---------------- Favorites ----------------
+const favorites = database.collection("favorite");
+
+// GET /favorites?userId=...&equipmentId=...  (equipmentId is optional)
+// Returns the saved items with the current equipment record joined in.
+app.get("/favorites", async (req, res) => {
+  try {
+    const { userId, equipmentId } = req.query;
+
+    if (!userId) {
+      return res.status(400).send({ error: "userId is required" });
+    }
+
+    const match = { userId: String(userId) };
+
+    if (equipmentId && ObjectId.isValid(equipmentId)) {
+      match.equipmentId = new ObjectId(equipmentId);
+    }
+
+    const rows = await favorites
+      .aggregate([
+        { $match: match },
+        { $sort: { favoritedAt: -1 } },
+        {
+          $lookup: {
+            from: "equipment",
+            localField: "equipmentId",
+            foreignField: "_id",
+            as: "equipment",
+          },
+        },
+        {
+          $unwind: { path: "$equipment", preserveNullAndEmptyArrays: true },
+        },
+      ])
+      .toArray();
+
+    res.status(200).send(rows);
+  } catch (err) {
+    console.error("Error fetching favorites:", err);
+    res.status(500).send({ error: "Failed to fetch favorites" });
+  }
+});
+
+// POST /favorites — save an equipment to a customer's favorites
+app.post("/favorites", async (req, res) => {
+  try {
+    const { userId, equipmentId } = req.body;
+
+    if (!userId || !equipmentId || !ObjectId.isValid(equipmentId)) {
+      return res.status(400).send({
+        error: "userId and a valid equipmentId are required",
+      });
+    }
+
+    const owner = String(userId);
+    const equipment = new ObjectId(equipmentId);
+
+    // Already saved? Return it instead of creating a duplicate.
+    const existing = await favorites.findOne({
+      userId: owner,
+      equipmentId: equipment,
+    });
+
+    if (existing) return res.status(200).send(existing);
+
+    const doc = {
+      userId: owner,
+      equipmentId: equipment,
+      favoritedAt: new Date(),
+    };
+
+    const result = await favorites.insertOne(doc);
+
+    res.status(201).send({ ...doc, _id: result.insertedId });
+  } catch (err) {
+    console.error("Error adding favorite:", err);
+    res.status(500).send({ error: "Failed to add favorite" });
+  }
+});
+
+// DELETE /favorites/:id — remove one saved item
+app.delete("/favorites/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(404).send({ error: "Favorite not found" });
+    }
+
+    const result = await favorites.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).send({ error: "Favorite not found" });
+    }
+
+    res.status(200).send({ deletedCount: result.deletedCount });
+  } catch (err) {
+    console.error("Error removing favorite:", err);
+    res.status(500).send({ error: "Failed to remove favorite" });
   }
 });
 

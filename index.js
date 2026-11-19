@@ -55,16 +55,57 @@ app.post("/add-equipment", async (req, res) => {
 });
 
 
+
+
 app.get("/equipment", async (req, res) => {
-    try {
-    const equipmentData = equipments.find({});
-    const equipmentArray = await equipmentData.toArray();
-    res.send(equipmentArray);
-    } catch (err) {
-    console.error("Error fetching equipment:", err);
-    res.status(500).send({ error: "Failed to fetch equipment" });
+  try {
+    const query = {};
+
+    // Search by equipment name or location (single search term, case-insensitive)
+    if (req.query.search) {
+      const searchRegex = {
+        $regex: req.query.search,
+        $options: "i",
+      };
+
+      query.$or = [{ name: searchRegex }, { location: searchRegex }];
     }
+
+    // Search by equipment name (case-insensitive)
+    if (req.query.name) {
+      query.name = {
+        $regex: req.query.name,
+        $options: "i",
+      };
+    }
+
+    // Search by location (case-insensitive)
+    if (req.query.location) {
+      query.location = {
+        $regex: req.query.location,
+        $options: "i",
+      };
+    }
+
+    // Category filter
+    if (req.query.category) {
+      query.category = req.query.category;
+    }
+
+    const equipmentArray = await equipments
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).send(equipmentArray);
+  } catch (err) {
+    console.error("Error fetching equipment:", err);
+    res.status(500).send({
+      error: "Failed to fetch equipment",
+    });
+  }
 });
+
 
 
 app.patch("/equipment/:id", async (req, res) => {

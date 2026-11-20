@@ -231,6 +231,28 @@ app.get("/rentals", async (req, res) => {
   }
 });
 
+// GET /rentals/:id — one booking (used by the payment page)
+app.get("/rentals/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(404).send({ error: "Booking not found" });
+    }
+
+    const booking = await rentals.findOne({ _id: new ObjectId(id) });
+
+    if (!booking) {
+      return res.status(404).send({ error: "Booking not found" });
+    }
+
+    res.status(200).send(booking);
+  } catch (err) {
+    console.error("Error fetching booking:", err);
+    res.status(500).send({ error: "Failed to fetch booking" });
+  }
+});
+
 // POST /rentals — a customer rents an equipment for a date range
 app.post("/rentals", async (req, res) => {
   try {
@@ -244,6 +266,9 @@ app.post("/rentals", async (req, res) => {
       quantity,
       rentalPrice,
       rentalType,
+      contactNumber,
+      deliveryAddress,
+      notes,
     } = req.body;
 
     if (!equipmentId || !customerId || !startDate || !endDate) {
@@ -278,6 +303,9 @@ app.post("/rentals", async (req, res) => {
       quantity: qty,
       days,
       totalAmount: price * units * qty,
+      contactNumber: contactNumber || "",
+      deliveryAddress: deliveryAddress || "",
+      notes: notes || "",
       paymentStatus: "Pending",
       bookingStatus: "Pending",
       bookingDate: new Date(),
@@ -293,7 +321,7 @@ app.post("/rentals", async (req, res) => {
 });
 
 
-// ---------------- Favorites ----------------
+// Favorites API
 const favorites = database.collection("favorite");
 
 // GET /favorites?userId=...&equipmentId=...  (equipmentId is optional)

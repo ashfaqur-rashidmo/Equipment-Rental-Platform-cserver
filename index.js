@@ -19,9 +19,11 @@ export async function connectToMongoDB() {
 }
 
 const connectedClient = await connectToMongoDB();
+
 const database = connectedClient.db("equipment_rental_platform");
 const users = database.collection("user");
 const equipments = database.collection("equipment");
+const payments = database.collection("payments");
 const rentals = database.collection("rental");
 
 const app = express();
@@ -68,13 +70,7 @@ const toFiniteNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-/**
- * Build the MongoDB filter for /equipment (and /equipment/categories)
- * from the incoming query string.
- *
- * Supported params: search, name, location, category, rentalType,
- * minPrice, maxPrice, available ("1" | "0").
- */
+
 function buildEquipmentQuery(params) {
   const query = {};
   const { search, name, location, category, rentalType, minPrice, maxPrice, available } =
@@ -253,6 +249,72 @@ app.get("/rentals/:id", async (req, res) => {
   }
 });
 
+
+// ET /owner/rentals — all customer bookings for the logged-in owner's equipment
+app.get("/owner/rentals", async (req, res) => {
+  try {
+    const { ownerId } = req.query;
+
+    if (!ownerId) {
+      return res.status(400).send({ error: "ownerId is required" });
+    }
+
+    const ownerEquipmentIds = await equipments
+      .find({ ownerId: String(ownerId) }, { projection: { _id: 1 } })
+      .toArray();
+
+    const equipmentIdList = ownerEquipmentIds.map((item) => item._id.toString());
+
+    const orderRentals = await rentals
+      .find({ equipmentId: { $in: equipmentIdList } })
+      .sort({ bookingDate: -1 })
+      .toArray();
+      
+    res.status(200).send(orderRentals);
+  } catch (err) {
+    console.error("Error fetching owner rentals:", err);
+    res.status(500).send({ error: "Failed to fetch owner rentals" });
+  }
+});
+
+
+// PATCH /rentals/:id — update payment/booking status (e.g. after Stripe payment)
+app.patch("/rentals/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(404).send({ error: "Booking not found" });
+    }
+
+    const updates = {};
+    if (req.body.paymentStatus) {
+      updates.paymentStatus = String(req.body.paymentStatus);
+    }
+    if (req.body.bookingStatus) {
+      updates.bookingStatus = String(req.body.bookingStatus);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).send({ error: "Nothing to update" });
+    }
+
+    const result = await rentals.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updates }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ error: "Booking not found" });
+    }
+
+    res.status(200).send({ modifiedCount: result.modifiedCount });
+  } catch (err) {
+    console.error("Error updating booking:", err);
+    res.status(500).send({ error: "Failed to update booking" });
+  }
+});
+
 // POST /rentals — a customer rents an equipment for a date range
 app.post("/rentals", async (req, res) => {
   try {
@@ -423,6 +485,116 @@ app.delete("/favorites/:id", async (req, res) => {
     res.status(500).send({ error: "Failed to remove favorite" });
   }
 });
+
+
+
+// customer payment information API — save Stripe transaction after successful payment
+ 
+app.post("/payments", async (req, res) => {
+  try {
+    const { rentalId } = req.body;
+
+    // Validate rental ID
+    if (!rentalId || !ObjectId.isValid(rentalId)) {
+      return res.status(400).send({
+        error: "Valid rental ID is required",
+      });
+    }
+
+    // Find rental
+    const rental = await rentals.findOne({
+      _id: new ObjectId(rentalId),
+    });
+
+    if (!rental) {
+      return res.status(404).send({
+        error: "Rental not found",
+      });
+    }
+
+    // Check payment status
+    if (rental.paymentStatus === "Paid") {
+      return res.status(400).send({
+        error: "This rental is already paid",
+      });
+    }
+
+    // Validate rental amount
+    if (!Number.isFinite(rental.totalAmount) || rental.totalAmount <= 0) {
+      return res.status(400).send({
+        error: "Invalid rental amount",
+      });
+    }
+
+    // Create Stripe Checkout Session
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+
+      line_items: [
+        {
+          price_data: {
+            currency: "BDT",
+            product_data: {
+              name: rental.equipmentName,
+              description: `${rental.days} days rental`,
+            },
+            unit_amount: Math.round(rental.totalAmount * 100),
+          },
+          quantity: 1,
+        },
+      ],
+
+      metadata: {
+        rentalId: rental._id.toString(),
+      },
+
+      success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+
+      cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
+    });
+
+    // Save payment information
+    await payments.insertOne({
+      rentalId: rental._id.toString(),
+      customerId: rental.customerId,
+      equipmentId: rental.equipmentId,
+      equipmentName: rental.equipmentName,
+      stripeSessionId: session.id,
+      amount: rental.totalAmount,
+      currency: "usd",
+      paymentStatus: "Pending",
+      transactionDate: new Date(),
+    });
+
+    res.status(201).send({
+      checkoutUrl: session.url,
+    });
+
+  } catch (err) {
+    console.error("Payment error:", err);
+
+    res.status(500).send({
+      error: "Failed to create payment session",
+    });
+  }
+});
+
+
+// GET all payment transactions
+app.get("/payments", async (req, res) => {
+  try {
+    const paymentsList = await payments
+      .find({})
+      .sort({ transactionDate: -1 })
+      .toArray();
+
+    res.status(200).send(paymentsList);
+  } catch (err) {
+    console.error("Error fetching payments:", err);
+    res.status(500).send({ error: "Failed to fetch payments" });
+  }
+});
+
 
 
 app.patch("/equipment/:id", async (req, res) => {

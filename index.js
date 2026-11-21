@@ -205,7 +205,6 @@ app.get("/equipment/:id", async (req, res) => {
 
 //  Rentals API
 
-
 // GET /rentals?userId=... — bookings of one customer, newest first
 app.get("/rentals", async (req, res) => {
   try {
@@ -616,6 +615,104 @@ app.delete("/equipment/:id", async (req, res) => {
   const { id } = req.params;
   const result = await equipments.deleteOne({ _id: new ObjectId(id) });
   res.send(result);
+});
+
+
+
+// admin routes
+// all users
+app.get("/admin/users", async (req, res) => {
+  try {
+    const usersData = users.find({});
+    const usersArray = await usersData.toArray();
+    res.send(usersArray);
+  } catch (err) {
+    console.error("Error fetching users:", err);
+    res.status(500).send({ error: "Failed to fetch users" });
+  }
+});
+
+// update a user's role
+app.patch("/admin/users/:id/role", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      res.status(400).send({ error: "Invalid user id." });
+      return;
+    }
+
+    if (!["Customer", "Owner", "Admin"].includes(role)) {
+      res.status(400).send({ error: "Invalid role." });
+      return;
+    }
+
+    const result = await users.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role } }
+    );
+
+    if (result.matchedCount === 0) {
+      res.status(404).send({ error: "User not found." });
+      return;
+    }
+
+    res.send({ message: "User role updated." });
+  } catch (err) {
+    console.error("Error updating user role:", err);
+    res.status(500).send({ error: "Failed to update user role" });
+  }
+});
+
+// delete a user
+app.delete("/admin/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      res.status(400).send({ error: "Invalid user id." });
+      return;
+    }
+
+    const result = await users.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      res.status(404).send({ error: "User not found." });
+      return;
+    }
+
+    res.send({ message: "User deleted." });
+  } catch (err) {
+    console.error("Error deleting user:", err);
+    res.status(500).send({ error: "Failed to delete user" });
+  }
+});
+
+
+// all equipment
+app.get("/admin/equipment", async (req, res) => {
+  try {
+    const equipmentData = equipments.find({});
+    const equipmentArray = await equipmentData.toArray();
+    res.send(equipmentArray);
+  } catch (err) {
+    console.error("Error fetching equipment:", err);
+    res.status(500).send({ error: "Failed to fetch equipment" });
+  }
+});
+
+
+// all rentals
+app.get("/admin/rentals", async (req, res) => {
+  try {
+    const rentalsData = rentals.find({});
+    const rentalsArray = await rentalsData.toArray();
+    res.send(rentalsArray);
+  } catch (err) {
+    console.error("Error fetching rentals:", err);
+    res.status(500).send({ error: "Failed to fetch rentals" });
+  }
 });
 
 app.listen(port, () => {

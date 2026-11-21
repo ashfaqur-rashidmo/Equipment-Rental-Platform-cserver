@@ -715,6 +715,24 @@ app.get("/admin/rentals", async (req, res) => {
   }
 });
 
+
+// get data from equipment database of the approval by admin
+app.get("/featured-equipment", async (req, res) => {
+  try {
+    const featuredEquipment = await equipments
+      .find({ status: "Approved" })
+      .sort({ createdAt: -1 })
+      .limit(6)
+      .toArray();
+
+    res.send(featuredEquipment);
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to fetch featured equipment",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });

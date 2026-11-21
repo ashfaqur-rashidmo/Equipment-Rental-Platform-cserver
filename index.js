@@ -2,11 +2,23 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { MongoClient, ObjectId } from 'mongodb';
+import Stripe from "stripe";
+import jwt from "jsonwebtoken";
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
 dotenv.config();
+
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
     
 
 const client = new MongoClient(process.env.MONGODB_URI);
+
+const myLogger = async (req, res, next) => {
+  console.log("Now Hitting API:", req.url,req.query,req.headers);
+  next();
+}
 
 export async function connectToMongoDB() {
   try {
@@ -36,17 +48,8 @@ app.get("/", (req, res) => {
   res.send(" Rental Platform Server is running");
 });
 
-
-
-app.get("/users", async (req, res) => {
-    const usersData = users.find({});
-    const usersArray = await usersData.toArray();
-    res.send(usersArray);
-});
-
-
 // Owner equipment add
-app.post("/add-equipment", async (req, res) => {
+app.post("/add-equipment",verifyToken,verifyOwner, async (req, res) => {
   try {
     const equipmentData = req.body;
     const result = await equipments.insertOne(equipmentData);
@@ -133,6 +136,7 @@ function buildEquipmentQuery(params) {
 }
 
 app.get("/equipment", async (req, res) => {
+ 
   try {
     const query = buildEquipmentQuery(req.query);
 
@@ -181,7 +185,8 @@ app.get("/equipment/categories", async (req, res) => {
 
 
 // Single equipment item by id
-app.get("/equipment/:id", async (req, res) => {
+app.get("/equipment/:id",verifyToken, async (req, res) => {
+  console.log("headers on the server", req.headers);
   try {
     const { id } = req.params;
 
@@ -206,7 +211,7 @@ app.get("/equipment/:id", async (req, res) => {
 //  Rentals API
 
 // GET /rentals?userId=... — bookings of one customer, newest first
-app.get("/rentals", async (req, res) => {
+app.get("/rentals",verifyToken, verifyRenter, async (req, res) => {
   try {
     const { userId } = req.query;
 
@@ -227,7 +232,7 @@ app.get("/rentals", async (req, res) => {
 });
 
 // GET /rentals/:id — one booking (used by the payment page)
-app.get("/rentals/:id", async (req, res) => {
+app.get("/rentals/:id",verifyToken, verifyRenter, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -250,7 +255,7 @@ app.get("/rentals/:id", async (req, res) => {
 
 
 // ET /owner/rentals — all customer bookings for the logged-in owner's equipment
-app.get("/owner/rentals", async (req, res) => {
+app.get("/owner/rentals", verifyToken, verifyOwner, async (req, res) => {
   try {
     const { ownerId } = req.query;
 
@@ -278,7 +283,7 @@ app.get("/owner/rentals", async (req, res) => {
 
 
 // PATCH /rentals/:id — update payment/booking status (e.g. after Stripe payment)
-app.patch("/rentals/:id", async (req, res) => {
+app.patch("/rentals/:id", verifyToken, verifyRenter, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -315,7 +320,7 @@ app.patch("/rentals/:id", async (req, res) => {
 });
 
 // POST /rentals — a customer rents an equipment for a date range
-app.post("/rentals", async (req, res) => {
+app.post("/rentals", verifyToken, verifyRenter, async (req, res) => {
   try {
     const {
       equipmentId,
@@ -387,7 +392,7 @@ const favorites = database.collection("favorite");
 
 // GET /favorites?userId=...&equipmentId=...  (equipmentId is optional)
 // Returns the saved items with the current equipment record joined in.
-app.get("/favorites", async (req, res) => {
+app.get("/favorites",verifyToken, verifyRenter, async (req, res) => {
   try {
     const { userId, equipmentId } = req.query;
 
@@ -427,7 +432,7 @@ app.get("/favorites", async (req, res) => {
 });
 
 // POST /favorites — save an equipment to a customer's favorites
-app.post("/favorites", async (req, res) => {
+app.post("/favorites", verifyToken, verifyRenter, async (req, res) => {
   try {
     const { userId, equipmentId } = req.body;
 
@@ -464,7 +469,7 @@ app.post("/favorites", async (req, res) => {
 });
 
 // DELETE /favorites/:id — remove one saved item
-app.delete("/favorites/:id", async (req, res) => {
+app.delete("/favorites/:id", verifyToken, verifyRenter, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -489,8 +494,12 @@ app.delete("/favorites/:id", async (req, res) => {
 
 // customer payment information API — save Stripe transaction after successful payment
  
-app.post("/payments", async (req, res) => {
+app.post("/payments", verifyToken,verifyRenter, async (req, res) => {
   try {
+    if (!stripe) {
+      return res.status(500).send({ error: "Stripe is not configured." });
+    }
+
     const { rentalId } = req.body;
 
     // Validate rental ID
@@ -580,7 +589,7 @@ app.post("/payments", async (req, res) => {
 
 
 // GET all payment transactions
-app.get("/payments", async (req, res) => {
+app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const paymentsList = await payments
       .find({})
@@ -596,7 +605,7 @@ app.get("/payments", async (req, res) => {
 
 
 
-app.patch("/equipment/:id", async (req, res) => {
+app.patch("/equipment/:id", verifyToken, verifyOwner, async (req, res) => {
   const { id } = req.params;
   const updateData = {...req.body};
 
@@ -611,7 +620,7 @@ app.patch("/equipment/:id", async (req, res) => {
 
 
 
-app.delete("/equipment/:id", async (req, res) => {
+app.delete("/equipment/:id", verifyToken, verifyOwner, async (req, res) => {
   const { id } = req.params;
   const result = await equipments.deleteOne({ _id: new ObjectId(id) });
   res.send(result);
@@ -621,7 +630,7 @@ app.delete("/equipment/:id", async (req, res) => {
 
 // admin routes
 // all users
-app.get("/admin/users", async (req, res) => {
+app.get("/admin/users", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const usersData = users.find({});
     const usersArray = await usersData.toArray();
@@ -633,7 +642,7 @@ app.get("/admin/users", async (req, res) => {
 });
 
 // update a user's role
-app.patch("/admin/users/:id/role", async (req, res) => {
+app.patch("/admin/users/:id/role", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { role } = req.body;
@@ -666,7 +675,7 @@ app.patch("/admin/users/:id/role", async (req, res) => {
 });
 
 // delete a user
-app.delete("/admin/users/:id", async (req, res) => {
+app.delete("/admin/users/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -691,7 +700,7 @@ app.delete("/admin/users/:id", async (req, res) => {
 
 
 // all equipment
-app.get("/admin/equipment", async (req, res) => {
+app.get("/admin/equipment", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const equipmentData = equipments.find({});
     const equipmentArray = await equipmentData.toArray();
@@ -704,7 +713,7 @@ app.get("/admin/equipment", async (req, res) => {
 
 
 // all rentals
-app.get("/admin/rentals", async (req, res) => {
+app.get("/admin/rentals", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const rentalsData = rentals.find({});
     const rentalsArray = await rentalsData.toArray();

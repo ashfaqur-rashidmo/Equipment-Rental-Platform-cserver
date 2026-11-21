@@ -48,6 +48,227 @@ app.get("/", (req, res) => {
   res.send(" Rental Platform Server is running");
 });
 
+// ---- JWT auth endpoints ----
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { name, email, password, photo } = req.body || {};
+
+    if (!name || !email || !password) {
+      return res
+        .status(400)
+        .send({ error: "Name, email and password are required." });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).send({ error: "Invalid email address." });
+    }
+    if (
+      !/[A-Z]/.test(password) ||
+      !/[a-z]/.test(password) ||
+      password.length < 6
+    ) {
+      return res.status(400).send({
+        error:
+          "Password must contain an uppercase letter, a lowercase letter and be at least 6 characters long.",
+      });
+    }
+
+    const existing = await users.findOne({ email });
+    if (existing) {
+      return res.status(400).send({ error: "Email already registered." });
+    }
+
+    const saltHex = randomBytes(16).toString("hex");
+    const newUser = {
+      name,
+      email,
+      passwordHash: hashPassword(password, saltHex),
+      passwordSalt: saltHex,
+      photo: photo || "",
+      role: "Customer",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await users.insertOne(newUser);
+    const token = issueToken(result.insertedId, newUser.email, "Customer");
+
+    res.status(201).send({
+      user: {
+        _id: result.insertedId,
+        name,
+        email,
+        photo: newUser.photo,
+        role: "Customer",
+      },
+      token,
+    });
+  } catch (err) {
+    console.error("Error registering user:", err);
+    res.status(500).send({ error: "Failed to register user." });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+
+    if (!email || !password) {
+      return res
+        .status(400)
+        .send({ error: "Email and password are required." });
+    }
+
+    const user = await users.findOne({ email });
+    if (
+      !user ||
+      !isValidPassword(password, user.passwordHash, user.passwordSalt)
+    ) {
+      return res.status(401).send({ error: "Invalid email or password." });
+    }
+
+    const token = issueToken(user._id, user.email, user.role || "Customer");
+
+    res.send({
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        photo: user.photo || "",
+        role: user.role || "Customer",
+      },
+      token,
+    });
+  } catch (err) {
+    console.error("Error logging in:", err);
+    res.status(500).send({ error: "Failed to log in." });
+  }
+});
+
+app.post("/api/auth/google-login", async (req, res) => {
+  try {
+    const { idToken } = req.body || {};
+    if (!idToken) {
+      return res.status(400).send({ error: "Google ID token is required." });
+    }
+
+    const info = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(
+        idToken
+      )}`
+    ).then((r) => r.json());
+
+    if (!info || !info.email) {
+      return res.status(401).send({ error: "Invalid Google token." });
+    }
+
+    let user = await users.findOne({ email: info.email });
+    const isNew = !user;
+
+    if (isNew) {
+      const saltHex = randomBytes(16).toString("hex");
+      user = {
+        name: info.name || info.email.split("@")[0],
+        email: info.email,
+        photo: info.picture || "",
+        passwordHash: null,
+        passwordSalt: null,
+        role: "Customer",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      const result = await users.insertOne(user);
+      user._id = result.insertedId;
+    }
+
+    const token = issueToken(user._id, user.email, user.role || "Customer");
+
+    res.status(isNew ? 201 : 200).send({
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        photo: user.photo || "",
+        role: user.role || "Customer",
+      },
+      token,
+    });
+  } catch (err) {
+    console.error("Google login error:", err);
+    res.status(500).send({ error: "Google login failed." });
+  }
+});
+
+
+ // ---- JWT + password helpers ----
+const issueToken = (userId, email, role) =>
+  jwt.sign(
+    { id: String(userId), email, role },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+
+const hashPassword = (password, saltHex) =>
+  scryptSync(password, Buffer.from(saltHex, "hex"), 32).toString("hex");
+
+const isValidPassword = (password, storedHash, storedSaltHex) => {
+  if (!storedHash || !storedSaltHex) return false;
+  const hash = hashPassword(password, storedSaltHex);
+  const a = Buffer.from(String(hash), "utf8");
+  const b = Buffer.from(String(storedHash), "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+};
+
+// Extracts the Bearer token, verifies it with JWT_SECRET and sets
+// req.user = { id, email, role } before calling next().
+const verifyToken = (req, res, next) => {
+  const header = req.headers.authorization;
+  const token =
+    header && header.toLowerCase().startsWith("bearer ")
+      ? header.slice(7).trim()
+      : null;
+
+  if (!token) {
+    return res.status(401).send({ error: "Unauthorized" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).send({ error: "Invalid or expired token" });
+  }
+};
+
+const verifyRenter = (req, res, next) => {
+  if (!req.user || req.user.role !== "Customer") {
+    return res.status(403).send({ error: "Customer access only" });
+  }
+  next();
+};
+
+const verifyOwner = (req, res, next) => {
+  if (!req.user || req.user.role !== "Owner") {
+    return res.status(403).send({ error: "Owner access only" });
+  }
+  next();
+};
+
+const verifyAdmin = (req, res, next) => {
+  if (!req.user || req.user.role !== "Admin") {
+    return res.status(403).send({ error: "Admin access only" });
+  }
+  next();
+};
+
+app.get("/users", async (req, res) => {
+    const usersData = users.find({});
+    const usersArray = await usersData.toArray();
+    res.send(usersArray);
+});
+
+
 // Owner equipment add
 app.post("/add-equipment",verifyToken,verifyOwner, async (req, res) => {
   try {
